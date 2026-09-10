@@ -8,7 +8,6 @@ from .utils import Wav2Vec2Config
 
 
 
-
 class Wav2Vec2GumbleVectorQuantizer(nn.Module):
     def __init__(self, config: Wav2Vec2Config) -> None:
         super().__init__()
@@ -22,14 +21,33 @@ class Wav2Vec2GumbleVectorQuantizer(nn.Module):
         
         self.weight_proj = nn.Linear(config.conv_dim[-1], self.num_codebooks * self.num_codes)
         self.temperature = 2
+    
+    def _compute_perplexity(self, probs, mask=None):
+        if mask is not None:
+            probs = probs[mask.flatten()]
+            
+        print(probs.shape)
         
     def forward(self, hidden_state, span_mask=None):
         batch_size, seq_len, hidden_dim = hidden_state.shape
-        hidden_state_weights = self.weight_proj(hidden_state).reshape(batch_size * seq_len * self.num_codebooks, -1)
-        print(hidden_state_weights.shape)
+        
+        print(f"hidden state before reshaping :{hidden_state.shape}")
+        
+        # converting each hidden state to a feature with number of codevector as dim, 
+        # so we can take argmax value from it to choose which codevector you are going to use.
+        hidden_state = self.weight_proj(hidden_state).reshape(batch_size * seq_len * self.num_codebooks, -1)
+        print(f"hidden state after linear layer and reshaping: {hidden_state.shape}")
         
         if self.training:
-            codevector_prob = F.gumbel_softmax(hidden_state_weights.float(), tau=self.temperature, hard=True)
+            # Softmax but differentiable way
+            # Setting True will make small value to zero and argmax value as 1
+            codevector_prob = F.gumbel_softmax(hidden_state.float(), tau=self.temperature, hard=True)
+            
+            # Compute perplexity which we need as a loss for making the codevector choosing even
+            hidden_state = hidden_state.reshape(batch_size * seq_len, self.num_codebooks, -1)
+            codevector_soft_dis = hidden_state.softmax(axis=-1)
+            self._compute_perplexity(codevector_soft_dis, span_mask)
+            
         
         
 
@@ -84,9 +102,6 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             
     def forward(self, x: torch.Tensor):
         for layer in self.conv_layers:
-            # print("before conv layer", x.shape)
-            # print("conv layer expecting input channels", layer.conv_layer.in_channels)
-            # print('conv layer output channels will be', layer.conv_layer.out_channels)
             x = layer(x)
         return x
 
@@ -240,14 +255,14 @@ class Wav2Vec2Model(nn.Module):
         self.encoder_layer = Wav2Vec2Encoder(config)
     
     def forward(self, 
-                audio_input_values,
+                input_values,
                 attention_mask=None,
                 sub_attention_mask=None,
                 span_mask=None,
                 return_features_to_quantize=False):
         
         
-        extracted_features = self.feature_extraction_layer(audio_input_values).transpose(1, 2)
+        extracted_features = self.feature_extraction_layer(input_values.unsqueeze(1)).transpose(1, 2)
         normed_x, projected_x = self.projection_layer(extracted_features)
         encoder_output = self.encoder_layer(projected_x)
         
@@ -268,23 +283,25 @@ class Wav2Vec2ForPretraining(nn.Module):
         self.quantizer = Wav2Vec2GumbleVectorQuantizer(config)
     
     def forward(self, 
-                audio_input_values,
+                input_values,
                 attention_mask=None,
                 sub_attention_mask=None,
-                span_mask=None,
+                mask_time_indices=None,
+                sampled_negatives=None,
                 return_features_to_quantize=False):
         
-        if span_mask is not None:
-            span_mask = span_mask.to(torch.bool)
+        if mask_time_indices is not None:
+            mask_time_indices = mask_time_indices.to(torch.bool)
             
-        transformer_output, features_to_quantize = self.wav2vec2(audio_input_values, 
+        transformer_output, features_to_quantize = self.wav2vec2(input_values, 
                                                                  attention_mask, 
                                                                  sub_attention_mask, 
-                                                                 span_mask, 
+                                                                 mask_time_indices, 
                                                                  return_features_to_quantize=True)
         
+        print(f"Transformer Output :{transformer_output.shape}")
         print("Features to quantize", features_to_quantize.shape)
-        a = self.quantizer(features_to_quantize, span_mask)
+        a = self.quantizer(features_to_quantize, mask_time_indices)
         
         
         
@@ -294,8 +311,18 @@ class Wav2Vec2ForPretraining(nn.Module):
         
     
 if __name__ == "__main__":
-    x = torch.randn(2, 1, 100000)
-    config = Wav2Vec2Config()
-    wav2vec_pretrain = Wav2Vec2ForPretraining(config)
+    from wav2vec.dataset import LibriSpeechDataset
+    from torch.utils.data import DataLoader
+    from wav2vec.dataset import Wav2Vec2CollateFunctionForPretraining
     
-    x = wav2vec_pretrain(x)
+    config = Wav2Vec2Config()
+    
+    dataset = LibriSpeechDataset(include_splits="dev")
+    dataloader = DataLoader(dataset, batch_size=2, collate_fn=Wav2Vec2CollateFunctionForPretraining(config))
+    
+    wav2vec_pretrain = Wav2Vec2ForPretraining(config)
+    data_iter = iter(dataloader)
+    next(data_iter)
+    input_data = next(data_iter)
+    
+    x = wav2vec_pretrain(**input_data)
