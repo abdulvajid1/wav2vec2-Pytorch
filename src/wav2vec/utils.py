@@ -3,6 +3,7 @@ from typing import Literal
 from typing import Optional
 import torch 
 import torch.nn as nn
+import soundfile as sf
 
 GREEN = "\033[92m"
 RESET = "\033[0m"
@@ -76,7 +77,7 @@ class Wav2Vec2Config:
     hf_model_name: str = "facebook/wav2vec2-base"
 
     ### Pretrain Backbone Config ###
-    path_to_pretrained_weights: str = None
+    path_to_pretrained_weights: str | None = None
 
     ### Backbone Config ###
     pretrained_backbone: Literal["pretrained", "pretrained_huggingface", "random"] = "pretrained"
@@ -167,7 +168,7 @@ def compute_span_masking(
     """
     batch_size, max_features_in_batch = shape
 
-    if attention_mask is not None:
+    if sub_attention_mask is not None:
         sequence_lengths = sub_attention_mask.sum(dim=1).to(torch.int).tolist()
     else:
         sequence_lengths = [max_features_in_batch] * batch_size
@@ -194,7 +195,7 @@ def compute_span_masking(
     
     return torch.stack(all_span_mask, dim=0)
 
-
+# TODO: Some problem with Sample negatives
 def sample_negative_indices(feature_shape, num_negatives, mask_time_indices):
 
     batch_size, max_features_len = feature_shape
@@ -242,8 +243,12 @@ def sample_negative_indices(feature_shape, num_negatives, mask_time_indices):
     )
 
 
+def get_audio_duration(audio_path: str):
+    "Return Audio duration in Seconds"
+    audio_info = sf.info(audio_path)
+    return audio_info.frames/audio_info.samplerate
 
-    
+
 
 if __name__ == "__main__":
     sampling_length = [10000, 15000]

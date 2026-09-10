@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import torchaudio
 import torch
+import soundfile as sf
 
 from .utils import (
     compute_span_masking,
@@ -9,6 +10,8 @@ from .utils import (
     compute_sub_attention_mask,
     Wav2Vec2Config
 )
+
+from .utils import get_audio_duration
 
 from transformers import Wav2Vec2CTCTokenizer
 from torch.utils.data import Dataset, DataLoader
@@ -34,25 +37,28 @@ class LibriSpeechDataset(Dataset):
         self.return_transcript = return_transcript
         self.truncate_audio = truncate_audio
         self.num_audio_channels = num_audio_channels
-        self.min_audio_samples = (min_audio_duration * sampling_rate)        
-        self.max_audio_samples = (max_audio_duration * sampling_rate)
+        self.min_audio_samples = int(min_audio_duration * sampling_rate)        
+        self.max_audio_samples = int(max_audio_duration * sampling_rate)
         self.librespeechdata = []
         for split in include_splits:
             path_to_split = os.path.join(path_to_data_root, split)
             
             for speaker in os.listdir(path_to_split):
+                if ".DS_Store" in speaker:
+                    continue
                 path_to_speaker = os.path.join(path_to_split, speaker)
                 
                 for section in os.listdir(path_to_speaker):
                     path_to_section = os.path.join(path_to_speaker, section)
+                    
+                    if ".DS_Store" in section:
+                        continue
                     
                     files = os.listdir(path_to_section)
                     # there will be a single file which have all the transcript of files
                     transcript_file = [path for path in files if ".txt" in path][0]
                     transcript_file = os.path.join(path_to_section, transcript_file)
                     
-                    audio_durations = pd.read_csv(os.path.join(path_to_section, "audio_durations.csv"))
-                    audio_durations_dict = audio_durations.set_index("root")["durations"].to_dict()
                     
                     with open(transcript_file, "r") as f:
                         transcripts = f.readlines()
@@ -63,7 +69,7 @@ class LibriSpeechDataset(Dataset):
                         audio_file = audio_root + ".flac"
                         audio_transcript = i[1].strip()    
                         path_to_audio_file = os.path.join(path_to_section, audio_file)
-                        duration = audio_durations_dict[audio_root]
+                        duration = get_audio_duration(path_to_audio_file)
                         
                         if (duration >= min_audio_duration and duration <= max_audio_duration or self.truncate_audio):
                             self.librespeechdata.append((path_to_audio_file, audio_transcript))
@@ -78,7 +84,8 @@ class LibriSpeechDataset(Dataset):
 
     def __getitem__(self, idx):
         path_to_audio, transcript = self.librespeechdata[idx]
-        audio, sr = torchaudio.load(path_to_audio)
+        audio, sr = sf.read(path_to_audio)
+        audio = torch.from_numpy(audio).unsqueeze(0).float()
         
         if self.truncate_audio:
             audio = audio[:, :self.max_audio_samples]
@@ -88,8 +95,10 @@ class LibriSpeechDataset(Dataset):
             audio = torchaudio.functional.resample(audio, orig_freq=sr, new_freq=self.sampling_rate)
         
         # audio channels should be 1
-        if self.num_audio_channels == 2:
+        if self.num_audio_channels != 2:
             audio = audio.squeeze()
+        
+        
         
         # normalize 
         audio = (audio - audio.mean()) / (audio.std() + 1e-7)
@@ -115,7 +124,7 @@ class LibriSpeechDataset(Dataset):
 def Wav2Vec2CollateFunctionForPretraining(config: Wav2Vec2Config):
     
     def collate_fun(batch):
-        batch_audios = [sample['inupt_values'] for sample in batch]
+        batch_audios = [sample['input_values'] for sample in batch]
         attention_mask = [torch.ones(len(audio)) for audio in batch_audios]
         batch_audios = torch.nn.utils.rnn.pad_sequence(batch_audios, batch_first=True, padding_value=0.0)
         attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0.0)
