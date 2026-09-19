@@ -5,8 +5,25 @@ import torch
 import torch.nn as nn
 import soundfile as sf
 
+import logging
+import sys
+
 GREEN = "\033[92m"
 RESET = "\033[0m"
+
+class SimpleFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return f"{GREEN}[{record.levelname}]{RESET}: {record.getMessage()}\n"
+
+def get_logger(name: str = "wav2vec2", level: int = logging.INFO) -> logging.Logger:
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(SimpleFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(level)
+        logger.propagate = False
+    return logger
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -152,8 +169,10 @@ def compute_span_masking(
     p_replace=0.8 
     ):
     """Main pretraining mask, mask some audio encoded features and it's adjecent n number of features
-       which then used to predict this masked tokens with all sarrounding features like bert,
-       we mask random tokens to make model predict using all other tokens which is the context
+       which then used to predict this masked tokens with all sarrounding features like we do in bert,
+       we mask random tokens to make model predict using all other tokens which is the context.
+
+       This will only have 1's in span masked position, nothing to do with other padded masking.
        
        Args: 
             shape: shape of the audio encoded features to get batch and sequence length

@@ -19,11 +19,11 @@ from torch.utils.data import Dataset, DataLoader
 class LibriSpeechDataset(Dataset):
     def __init__(
         self,
-        path_to_data_root='./dataset',
-        include_splits=['dev'],
-        max_audio_duration=20.0,
+        path_to_data_root='./dataset/LibriSpeech',
+        include_splits=['dev-clean'],
+        max_audio_duration=5.0,
         min_audio_duration=2.0,
-        sampling_rate=160000,
+        sampling_rate=16000,
         num_audio_channels=1,
         truncate_audio=True,
         return_transcript=True,
@@ -87,12 +87,14 @@ class LibriSpeechDataset(Dataset):
         audio, sr = sf.read(path_to_audio)
         audio = torch.from_numpy(audio).unsqueeze(0).float()
         
-        if self.truncate_audio:
-            audio = audio[:, :self.max_audio_samples]
 
         # sanity check for sampling rate
         if sr != self.sampling_rate:
             audio = torchaudio.functional.resample(audio, orig_freq=sr, new_freq=self.sampling_rate)
+
+        if self.truncate_audio:
+            audio = audio[:, :self.max_audio_samples]
+
         
         # audio channels should be 1
         if self.num_audio_channels != 2:
@@ -163,7 +165,7 @@ def Wav2Vec2CollateFunctionForPretraining(config: Wav2Vec2Config):
 
 if __name__ == "__main__":
     config = Wav2Vec2Config()
-    dataset = LibriSpeechDataset(include_splits="dev")
+    dataset = LibriSpeechDataset(include_splits="dev-clean")
     dataloader = DataLoader(dataset, batch_size=4, collate_fn=Wav2Vec2CollateFunctionForPretraining(config))
     
     sample = next(iter(dataloader))
