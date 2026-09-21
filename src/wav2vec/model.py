@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from .utils import Wav2Vec2Config, get_logger
 
+from .utils import Wav2Vec2ForPreTrainingOutput
+
 logger = get_logger("wav2vec2.model")
 
 
@@ -417,12 +419,12 @@ class Wav2Vec2ForPretraining(nn.Module):
             logger.info(f"Cosine Similarity: {cosine_similarity.shape}")
 
 
-            # Now this block why this exist, my best guess is, the sampled negatives have many 0's due to we only need
-            # sampled neegatives for masked positions, but we are sampling for all positions, so many of them will be 0's,
-            # and some of them will be equal to positive samples, which will lead to NaN loss values, so we need to check
-            #  if any negative sample is equal to positive sample and set the similarity of that negative sample to a very low value,
-            #  so they don't contribute to the loss due to how cross entropy loss works, it will make the softmax of that
-            #  negative sample to be zero, so it won't contribute to the loss
+            # the intution here, it's true that negative and positive samples are different when we creat negative samples,
+            # but when each of them pick a quantizer vector, there is high chance at initial time of the training, 
+            # the negative sample and positive sample will pick same quantizer vector, which will make the cosine similarity to be 1, 
+            # which will make the softmax of that negative sample to be 1, which will make the loss to be NaN, 
+            # so we need to check if any negative sample is equal to positive sample and if yes, we need to set 
+            # the similarity of that negative sample to be very low value, so it won't contribute to the loss.
             neg_equals_pos_mask = (quantized_vectors == negative_quantized_codes).all(dim=-1)
 
             if neg_equals_pos_mask.any():
@@ -434,6 +436,30 @@ class Wav2Vec2ForPretraining(nn.Module):
                 cosine_similarity[1: ][neg_equals_pos_mask] = float('-inf')  
 
 
+            cosine_similarity = cosine_similarity.permute(1, 2, 0) # shape: (batch_size, seq_len, 1 + num_negatives)
+            cosine_similarity = cosine_similarity.reshape(batch_size * seq_len, cosine_similarity.shape[-1]) # shape: (batch_size * seq_len, 1 + num_negatives)
+
+            # we create labels, we keep all -100 except the masked positions, we only need loss on the masked positions
+            # the first label will be the positive sample, so we set it as 1 and all other labels as 0's
+            labels = torch.ones(len(cosine_similarity), dtype=torch.long, device=cosine_similarity.device) * -100
+
+            # now for each negatives, we set label to 0 , since we know first vector is the positive sample
+            labels[mask_time_indices.flatten()] = 0
+            contrastive_loss = F.cross_entropy(cosine_similarity, labels, reduction="sum") / mask_time_indices.sum()
+
+            GV = self.config.num_codevector_groups * self.config.num_codevectors_per_group
+            diversity_loss = ((GV - perplexity) / GV) * mask_time_indices.sum()
+
+            loss = contrastive_loss + self.config.diversity_loss_weight * diversity_loss
+
+            return Wav2Vec2ForPreTrainingOutput(
+                loss=loss,
+                projected_features=transformer_output,
+                quantized_features=quantized_vectors,
+                codevector_perplexity=perplexity,
+                contrastive_loss=contrastive_loss,
+                diversity_loss=diversity_loss
+            )
 
 
             
