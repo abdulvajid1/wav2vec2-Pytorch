@@ -24,7 +24,6 @@ class Wav2Vec2GumbleVectorQuantizer(nn.Module):
     
     def _compute_perplexity(self, probs, mask=None):
 
-
         if mask is not None:
             # only taking perplexity loss on masked positions codevectores, since it's the only vectors influence the loss.
             # each masked vector will have codevector which tells, what is probabilty of this vector to choose a code vector
@@ -331,8 +330,26 @@ class Wav2Vec2ForPretraining(nn.Module):
         self.dropout_layer = nn.Dropout(config.pre_quantizer_dropout)
         self.quantizer = Wav2Vec2GumbleVectorQuantizer(config)
 
-        self.proj_down = nn.Line
-    
+        self.proj_transformer = nn.Linear(config.embedding_dimension, config.codevector_dim)
+        self.proj_codevector = nn.Linear(config.codevector_dim, config.codevector_dim)
+
+    def cosine_similarity(self, target_features, negative_features, predicted_features, temperature=0.1):
+        # target feature is the postive quantized codevector, negative features are the
+        # negative quantized codevectors, predicted features are the transformer output
+        # projected to codevector dim, we concatenate the target/positive and negative features to 
+        # make a single tensor of shape (1 + num_negatives, batch_size, seq_len, feature_dim)
+
+        target_features = target_features.unsqueeze(0)  # shape: (1, batch_size, seq_len, feature_dim) 
+        target_features = torch.cat([target_features, negative_features], dim=0)  # shape: (1 + num_negatives, batch_size, seq_len, feature_dim)
+
+        # Now we calculate the cosine similarity between the predicted features and the concatenated
+        # target/positive and negative features
+
+        # cosine similarity between (batch_size, seq_len, feature_dim) and (positive_target + num_negatives, batch_size, seq_len, feature_dim)
+        cosine_sim = torch.cosine_similarity(predicted_features, target_features, dim=-1) / temperature
+        return cosine_sim
+
+
     def forward(self, 
                 input_values,
                 attention_mask=None,
@@ -359,6 +376,68 @@ class Wav2Vec2ForPretraining(nn.Module):
 
         logger.info(f"Codevector {codevectors.shape}")
         logger.info(f"perplexity {perplexity}")
+
+        # Project down the tranformer output for contrastive loss with quantized codebook vector
+        quantized_vectors = self.proj_codevector(codevectors)
+        transformer_output = self.proj_transformer(transformer_output)
+        logger.info(f"Quantized Vectors: {quantized_vectors.shape}")
+        logger.info(f"Transformer Output: {transformer_output.shape}")
+
+        loss = None
+        diversity_loss = None
+        contrastive_loss = None
+
+        if sampled_negatives is not None:
+            batch_size, seq_len, vq_size = quantized_vectors.shape
+            _, num_negatives = sampled_negatives.shape
+
+
+            logger.info(f"Quantized Vectors: {quantized_vectors.shape}")
+            logger.info(f"Sampled Negatives: {sampled_negatives.shape}")
+            logger.info(f"sampled_negatives: {sampled_negatives}")
+            negative_quantized_codes = quantized_vectors.reshape(-1, vq_size)[sampled_negatives.flatten()]
+
+            logger.info(f"Negative Quantized Codes: {negative_quantized_codes.shape}")
+
+
+            # Reshape negative quantized codes to (num_negatives, batch_size, seq_len, vq_size)
+            # So each will be audio feature (batch, seq, vq_size) will be negative samples making (num_negatives, batch, seq, vq_size)
+
+            negative_quantized_codes = negative_quantized_codes.reshape(batch_size, seq_len, num_negatives, vq_size).permute(2, 0, 1, 3) # shape: (num_negatives, batch_size, seq_len, vq_size)
+            logger.info(f"Negative Quantized Codes After Permute: {negative_quantized_codes.shape}")
+
+
+
+
+            cosine_similarity = self.cosine_similarity(quantized_vectors, 
+                                                       negative_quantized_codes,
+                                                       transformer_output,
+                                                       temperature=self.config.contrastive_logits_temperature)
+
+            logger.info(f"Cosine Similarity: {cosine_similarity.shape}")
+
+
+            # Now this block why this exist, my best guess is, the sampled negatives have many 0's due to we only need
+            # sampled neegatives for masked positions, but we are sampling for all positions, so many of them will be 0's,
+            # and some of them will be equal to positive samples, which will lead to NaN loss values, so we need to check
+            #  if any negative sample is equal to positive sample and set the similarity of that negative sample to a very low value,
+            #  so they don't contribute to the loss due to how cross entropy loss works, it will make the softmax of that
+            #  negative sample to be zero, so it won't contribute to the loss
+            neg_equals_pos_mask = (quantized_vectors == negative_quantized_codes).all(dim=-1)
+
+            if neg_equals_pos_mask.any():
+                logger.warning(f"Some negative samples are equal to positive samples. This may lead to NaN loss values. Please check your negative sampling strategy.")
+
+                # Set the similarity of negative samples that are equal to positive samples to a very low value,
+                # so they don't contribute to the loss due to how cross entropy loss works,
+                # it will make the softmax of that negative sample to be zero, so it won't contribute to the loss
+                cosine_similarity[1: ][neg_equals_pos_mask] = float('-inf')  
+
+
+
+
+            
+
         
         
         

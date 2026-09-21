@@ -224,11 +224,16 @@ def sample_negative_indices(feature_shape, num_negatives, mask_time_indices):
         dtype=torch.long
     )
 
+    # positive samples will be the samples in it's correct position, 
+    # for eg: 3rd vector positve sample will be 3rd vector itself, 
+    # so we use arange that give each vector it's index
+    # expand makes each index repeats in num negative
     positive_samples = (
         torch.arange(max_features_len)
         .unsqueeze(1)
         .expand(max_features_len, num_negatives)
     )
+
 
     for batch in range(batch_size):
 
